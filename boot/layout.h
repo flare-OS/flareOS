@@ -1,0 +1,11 @@
+#ifndef FLARE_LAYOUT_H
+#define FLARE_LAYOUT_H
+
+#define DISK_SECTORS 131072
+#define STAGE2_SECTORS 96
+#define KERNEL_LBA 65
+#define KERNEL_SECTORS 256
+#define FS_LBA 321
+#define FS_SECTORS 256
+
+#endif
