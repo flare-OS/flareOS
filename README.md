@@ -1,4 +1,30 @@
 # flareOS
+> [!CAUTION]
+> This OS is under development. It may not boot or could corrupt data if used improperly.
+> Note that it does not work on real hardware for now! flareOS hexdump reports disk read failures!
+
+## About
+flareOS is a new operating system comming to the world of shell oses, operating systems that contains no form
+of GUI/UI.
+
+Developed by a solo dev, for now it only has a few functionalities and real hardware support is
+in active development.
+
+## Makefile scripts
+| Commands  | Actions                          |
+|-----------|----------------------------------|
+| make      | Builds the project               |
+| make run  | Runs the .img using QEMU         |
+
+## Features
+- A filesystem (read-write)
+- UNIX type commands
+- Snake game (in-work)
+- AZERTY & QWERTY Support
+- Panic command
+- A BSOD Screen
+- Paging
+- An in-work top (Linux task manager) remake
 
 ## Build
 
@@ -8,7 +34,7 @@ make
 
 This produces a raw BIOS disk image at `build/os.img`.
 
-## Write To USB With dd
+## Write To USB With dd (FAILS!)
 
 Build the image, then write it to a USB drive:
 
