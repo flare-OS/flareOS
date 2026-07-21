@@ -48,28 +48,51 @@ static volatile u8 key_queue_head = 0;
 static volatile u8 key_queue_tail = 0;
 static const u16 *g_keymap = qwerty_keymap;
 static int g_layout = KEYBOARD_LAYOUT_QWERTY;
+static int g_shift = 0;
+static int g_caps = 0;
+
+static u16 shift_value(u16 key) {
+    switch (key) {
+        case '1': return '!'; case '2': return '@'; case '3': return '#';
+        case '4': return '$'; case '5': return '%'; case '6': return '^';
+        case '7': return '&'; case '8': return '*'; case '9': return '(';
+        case '0': return ')'; case '-': return '_'; case '=': return '+';
+        case '[': return '{'; case ']': return '}';
+        case ';': return ':'; case '\'': return '"';
+        case '`': return '~'; case '\\': return '|';
+        case ',': return '<'; case '.': return '>'; case '/': return '?';
+        default: return 0;
+    }
+}
 
 void keyboard_handle_irq(void) {
     u8 scancode = inb(0x60);
-    u8 next_head;
-    u16 key;
 
-    if ((scancode & 0x80u) != 0) {
-        return;
-    }
-    if (scancode >= 128) {
-        return;
-    }
+    if (scancode == 0x2A || scancode == 0x36) { g_shift = 1; return; }
+    if (scancode == 0xAA || scancode == 0xB6) { g_shift = 0; return; }
 
-    key = g_keymap[scancode];
-    if (key == KEY_NONE) {
+    if (scancode == 0x3A) {
+        g_caps = !g_caps;
         return;
     }
 
-    next_head = (u8)((key_queue_head + 1u) % KEY_QUEUE_SIZE);
-    if (next_head == key_queue_tail) {
-        return;
+    if (scancode & 0x80u) return;
+    if (scancode >= 128) return;
+
+    u16 key = g_keymap[scancode];
+    if (key == KEY_NONE) return;
+
+    if (key >= 'a' && key <= 'z') {
+        if (g_shift ^ g_caps) {
+            key = (u16)(key - 'a' + 'A');
+        }
+    } else if (g_shift) {
+        u16 s = shift_value(key);
+        if (s) key = s;
     }
+
+    u8 next_head = (u8)((key_queue_head + 1u) % KEY_QUEUE_SIZE);
+    if (next_head == key_queue_tail) return;
 
     key_queue[key_queue_head] = key;
     key_queue_head = next_head;

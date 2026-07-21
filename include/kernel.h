@@ -142,4 +142,22 @@ void bsod_show(const char *title, const char *message, const InterruptFrame *fra
 void serial_init(void);
 void serial_write(const char *text);
 
+u32 pci_find_device(u16 vendor_id, u16 device_id);
+u32 pci_read_bar0(u32 pci_loc);
+u16 pci_read_command(u32 pci_loc);
+void pci_write_command(u32 pci_loc, u16 command);
+u8 pci_read_irq(u32 pci_loc);
+
+int rtl8139_init(void);
+int rtl8139_present(void);
+void rtl8139_get_mac(u8 *mac_out);
+int rtl8139_send_packet(const void *data, u16 length);
+u16 rtl8139_poll_packet(const u8 **data_out);
+
+void net_init(void);
+int net_is_ready(void);
+void net_poll(void);
+void net_get_ip(u32 *ip, u32 *gw, u32 *dns, u32 *mask);
+int net_http_get(const char *url, u8 *out_buf, u32 out_capacity, u32 *out_len);
+
 #endif

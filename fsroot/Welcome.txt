@@ -1,0 +1,4 @@
+Hello and welcome to flareOS!
+This is a new lightweight operating system in work.
+
+Feel free to explore!

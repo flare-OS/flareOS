@@ -38,7 +38,10 @@ KERNEL_OBJS := \
 	$(BUILD)/ps2.o \
 	$(BUILD)/ata.o \
 	$(BUILD)/keyboard.o \
-	$(BUILD)/ext4.o
+	$(BUILD)/ext4.o \
+	$(BUILD)/pci.o \
+	$(BUILD)/rtl8139.o \
+	$(BUILD)/net.o
 
 all: $(BUILD)/os.img
 
@@ -99,7 +102,7 @@ usb-dd: $(BUILD)/os.img scripts/write_usb.sh
 	./scripts/write_usb.sh $(BUILD)/os.img $(DEVICE)
 
 run: $(BUILD)/os.img
-	$(QEMU) -no-user-config -sandbox off -drive format=raw,file=$(BUILD)/os.img,if=ide,index=0 -vga std -serial stdio -no-reboot -no-shutdown
+	$(QEMU) -no-user-config -sandbox off -drive format=raw,file=$(BUILD)/os.img,if=ide,index=0 -vga std -serial stdio -no-reboot -no-shutdown -netdev user,id=net0 -device rtl8139,netdev=net0 -m 1G
 
 clean:
 	rm -rf $(BUILD)

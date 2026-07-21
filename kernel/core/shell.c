@@ -40,7 +40,8 @@ static int g_snake_owner_session = -1;
 static u64 g_snake_ticks = 0;
 static u32 g_snake_input_count = 0;
 static u32 g_snake_render_count = 0;
-static volatile int g_shell_dirty = 1;
+static int g_shell_dirty = 1;
+static int g_prompt_dirty = 0;
 
 static void append_char(char *buffer, usize size, usize *len, char ch) {
     if (*len + 1 >= size) {
@@ -491,6 +492,89 @@ static void shell_remove_file_command(ShellSession *session, const char *args) {
     session_push_line(session, "file removed");
 }
 
+static void append_ip(char *buffer, usize size, usize *len, u32 ip) {
+    append_u64_dec(buffer, size, len, (ip >> 24) & 0xFF);
+    append_char(buffer, size, len, '.');
+    append_u64_dec(buffer, size, len, (ip >> 16) & 0xFF);
+    append_char(buffer, size, len, '.');
+    append_u64_dec(buffer, size, len, (ip >> 8) & 0xFF);
+    append_char(buffer, size, len, '.');
+    append_u64_dec(buffer, size, len, ip & 0xFF);
+}
+
+static void shell_net_status(ShellSession *session) {
+    char line[64];
+    usize len = 0;
+    line[0] = '\0';
+    append_text(line, sizeof(line), &len, net_is_ready() ? "net: online" : "net: offline");
+    session_push_line(session, line);
+    if (net_is_ready()) {
+        u32 ip, gw, dns, mask;
+        net_get_ip(&ip, &gw, &dns, &mask);
+        len = 0; line[0] = '\0';
+        append_text(line, sizeof(line), &len, "ip ");
+        append_ip(line, sizeof(line), &len, ip);
+        session_push_line(session, line);
+        len = 0; line[0] = '\0';
+        append_text(line, sizeof(line), &len, "gw ");
+        append_ip(line, sizeof(line), &len, gw);
+        session_push_line(session, line);
+        len = 0; line[0] = '\0';
+        append_text(line, sizeof(line), &len, "dns ");
+        append_ip(line, sizeof(line), &len, dns);
+        session_push_line(session, line);
+        len = 0; line[0] = '\0';
+        append_text(line, sizeof(line), &len, "mask ");
+        append_ip(line, sizeof(line), &len, mask);
+        session_push_line(session, line);
+    }
+}
+
+static void shell_curl(ShellSession *session, const char *url) {
+    if (!net_is_ready()) {
+        session_push_line(session, "net: network not ready");
+        return;
+    }
+    session_push_line(session, "curl: fetching...");
+    char name[32];
+    usize nlen = 0;
+    name[0] = '\0';
+    append_text(name, sizeof(name), &nlen, "resp");
+    {
+        u32 h = 0;
+        const char *p = url;
+        while (*p) { h = h * 31 + *p; ++p; }
+        append_u64_dec(name, sizeof(name), &nlen, h % 1000);
+    }
+    name[nlen] = '\0';
+
+    u8 buf[8192];
+    u32 out_len = 0;
+    if (net_http_get(url, buf, sizeof(buf), &out_len)) {
+        char size_line[64];
+        usize slen = 0; size_line[0] = '\0';
+        append_text(size_line, sizeof(size_line), &slen, "curl: got ");
+        append_u64_dec(size_line, sizeof(size_line), &slen, out_len);
+        append_text(size_line, sizeof(size_line), &slen, " bytes");
+        session_push_line(session, size_line);
+        if (fs_is_writable()) {
+            if (fs_write_file(name, (const char *)buf, out_len, 0)) {
+                char saved[64];
+                usize saved_len = 0; saved[0] = '\0';
+                append_text(saved, sizeof(saved), &saved_len, "curl: saved to ");
+                append_text(saved, sizeof(saved), &saved_len, name);
+                session_push_line(session, saved);
+            } else {
+                session_push_line(session, "curl: write failed");
+            }
+        } else {
+            session_push_line(session, "curl: read-only fs");
+        }
+    } else {
+        session_push_line(session, "curl: failed");
+    }
+}
+
 static void shell_halt(ShellSession *session) {
     session_push_line(session, "cpu halted");
     g_shell_dirty = 1;
@@ -840,7 +924,7 @@ static void shell_run_command(ShellSession *session) {
         session_push_line(session, "help clear echo ls cat pwd uname whoami");
         session_push_line(session, "users uptime mem paging snake sessions");
         session_push_line(session, "switch <tty|user> top layout install");
-        session_push_line(session, "write append rm panic halt");
+        session_push_line(session, "write append rm panic halt net curl <url>");
     } else if (strcmp(line, "clear") == 0) {
         session->line_count = 0;
     } else if (strncmp(line, "echo ", 5) == 0) {
@@ -890,6 +974,10 @@ static void shell_run_command(ShellSession *session) {
         }
     } else if (strcmp(line, "top") == 0 || strcmp(line, "tasks") == 0 || strcmp(line, "taskman") == 0) {
         shell_open_task_manager();
+    } else if (strcmp(line, "net") == 0) {
+        shell_net_status(session);
+    } else if (strncmp(line, "curl ", 5) == 0) {
+        shell_curl(session, line + 5);
     } else if (strcmp(line, "panic") == 0 || strcmp(line, "crash") == 0) {
         shell_trigger_panic();
     } else if (strcmp(line, "halt") == 0) {
@@ -1007,7 +1095,25 @@ void shell_init(void) {
     g_shell_dirty = 1;
 }
 
+static void shell_update_prompt(void) {
+    ShellSession *session = active_session();
+    char prompt[SHELL_INPUT_LEN + 20];
+    int bottom = console_height() - 1;
+
+    session_prompt_line(session, g_active_session, prompt, sizeof(prompt));
+    console_fill_row(bottom, 0x01);
+    console_write_at(0, bottom, 0x0f, prompt);
+    console_set_cursor((int)strlen(prompt), bottom);
+    ++session->render_count;
+    g_prompt_dirty = 0;
+}
+
 void shell_render(void) {
+    if (g_prompt_dirty && !g_shell_dirty) {
+        shell_update_prompt();
+        return;
+    }
+    g_prompt_dirty = 0;
     if (g_shell_view == SHELL_VIEW_SWITCHER) {
         shell_render_switcher();
         return;
@@ -1069,15 +1175,17 @@ void shell_keyboard_event(u16 key, int pressed) {
     }
     if (key == KEY_ENTER) {
         shell_run_command(session);
+        g_shell_dirty = 1;
     } else if (key == KEY_BACKSPACE) {
         if (session->input_len > 0) {
             session->input[--session->input_len] = '\0';
         }
+        g_prompt_dirty = 1;
     } else if (key >= ' ' && key <= '~' && session->input_len + 1 < (int)sizeof(session->input)) {
         session->input[session->input_len++] = (char)key;
         session->input[session->input_len] = '\0';
+        g_prompt_dirty = 1;
     }
-    g_shell_dirty = 1;
 }
 
 void shell_timer_tick(void) {
@@ -1096,7 +1204,7 @@ void shell_timer_tick(void) {
 
 int shell_needs_redraw(void) {
     if (snake_visible_for_active_session()) {
-        return g_shell_dirty || snake_needs_redraw();
+        return g_shell_dirty || g_prompt_dirty || snake_needs_redraw();
     }
-    return g_shell_dirty;
+    return g_shell_dirty || g_prompt_dirty;
 }

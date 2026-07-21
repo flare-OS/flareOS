@@ -155,6 +155,7 @@ void kernel_main(BootInfo *boot_info) {
     keyboard_set_layout(KEYBOARD_LAYOUT_QWERTY);
     fs_init((const void *)(usize)g_boot_info.fs_addr, g_boot_info.fs_size);
     kernel_apply_saved_layout();
+    net_init();
     shell_init();
     outb(0xe9, 'G');
     shell_render();
