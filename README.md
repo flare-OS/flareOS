@@ -25,7 +25,8 @@ in active development.
 - A BSOD Screen
 - Paging
 - An in-work top (Linux task manager) remake
-
+- Ethernet support
+- cURL support
 ## Build
 
 ```bash
