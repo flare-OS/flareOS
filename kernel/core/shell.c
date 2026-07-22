@@ -535,6 +535,14 @@ static void shell_curl(ShellSession *session, const char *url) {
         session_push_line(session, "net: network not ready");
         return;
     }
+    if (!url || url[0] == '\0') {
+        session_push_line(session, "curl: missing URL");
+        return;
+    }
+    if (strncmp(url, "http://", 7) != 0) {
+        session_push_line(session, "curl: only http:// URLs supported");
+        return;
+    }
     session_push_line(session, "curl: fetching...");
     char name[32];
     usize nlen = 0;
