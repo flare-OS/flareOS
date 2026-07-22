@@ -144,7 +144,8 @@ static int arp_resolve(u32 ip, u8 *mac_out) {
     }
     for (int att = 0; att < 3; ++att) {
         arp_send_request(ip);
-        for (u32 t = 0; t < 2000000; ++t) {
+        u64 deadline = g_ticks + 10;
+        while (g_ticks < deadline) {
             net_poll();
             for (int i = 0; i < ARP_CACHE_SIZE; ++i) {
                 if (g_arp_cache[i].valid && g_arp_cache[i].ip == ip) {
@@ -296,7 +297,8 @@ static u32 dns_resolve(const char *hostname) {
 
     for (int att = 0; att < 3; ++att) {
         net_send_udp(g_dns_ip, 12345, 53, dns_buf, total);
-        for (u32 t = 0; t < 3000000; ++t) {
+        u64 deadline = g_ticks + 150;
+        while (g_ticks < deadline) {
             net_poll();
             if (g_dns_done) return g_dns_result;
         }
@@ -443,7 +445,8 @@ static int tcp_connect(u32 dst_ip, u16 dst_port) {
 
     tcp_send_flags(&g_tcp, TCP_SYN, NULL, 0);
 
-    for (u32 t = 0; t < 5000000; ++t) {
+    u64 deadline = g_ticks + 300;
+    while (g_ticks < deadline) {
         net_poll();
         if (g_tcp.state == TCP_STATE_ESTABLISHED) return 1;
         if (g_tcp.state == TCP_STATE_DONE) return 0;
@@ -459,7 +462,8 @@ static int tcp_send(const void *data, u16 len) {
 }
 
 static int tcp_recv_all(void) {
-    for (u32 t = 0; t < 10000000; ++t) {
+    u64 deadline = g_ticks + 600;
+    while (g_ticks < deadline) {
         net_poll();
         if (g_tcp.rx_done) return 1;
     }
@@ -606,7 +610,9 @@ void net_poll(void) {
     const u8 *data;
     u16 len;
 
-    while ((len = rtl8139_poll_packet(&data)) > 0) {
+    for (int packets = 0; packets < 16; ++packets) {
+        len = rtl8139_poll_packet(&data);
+        if (len == 0) break;
         if (len < sizeof(EthHeader)) continue;
         const EthHeader *eth = (const EthHeader *)data;
         u16 etype = ntohs(eth->ethertype);

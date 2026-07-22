@@ -185,9 +185,10 @@ int rtl8139_send_packet(const void *data, u16 length) {
 
 /* Returns packet length or 0 if none available. data_out points into RX buffer. */
 u16 rtl8139_poll_packet(const u8 **data_out) {
-    if (!g_nic_found) {
+    if (!g_nic_found || !data_out) {
         return 0;
     }
+    *data_out = NULL;
 
     /* Check if buffer is empty */
     if (rtl_read8(RTL_CMD) & RTL_CMD_BUFE) {
@@ -195,16 +196,24 @@ u16 rtl8139_poll_packet(const u8 **data_out) {
     }
 
     /* RX packet header: 2 bytes status, 2 bytes length */
-    u16 rx_header = *(volatile u16 *)(g_rx_buffer + g_rx_offset);
-    u16 rx_status = rx_header;
+    u16 rx_status = *(volatile u16 *)(g_rx_buffer + g_rx_offset);
     u16 rx_length = *(volatile u16 *)(g_rx_buffer + g_rx_offset + 2);
+
+    /* Validate the header before trusting it */
+    u16 next_offset = (u16)((g_rx_offset + rx_length + 4 + 3) & ~3u);
+    if (rx_length < 60 || rx_length > 1518 || next_offset >= RTL_RX_BUF_SIZE) {
+        /* Corrupt header: reset the RX buffer state */
+        g_rx_offset = 0;
+        rtl_write16(RTL_CAPR, (u16)-16);
+        rtl_write16(RTL_ISR, RTL_ISR_ROK);
+        return 0;
+    }
 
     /* Check for valid packet */
     if (!(rx_status & 0x01)) { /* ROK bit */
-        /* Skip to next */
-        g_rx_offset = (u16)((g_rx_offset + rx_length + 4 + 3) & ~3u);
-        if (g_rx_offset >= RTL_RX_BUF_SIZE) {
-            g_rx_offset = (u16)(g_rx_offset % (RTL_RX_BUF_SIZE - RTL_RX_BUF_PAD));
+        g_rx_offset = next_offset;
+        if (g_rx_offset >= RTL_RX_BUF_SIZE - RTL_RX_BUF_PAD) {
+            g_rx_offset = 0;
         }
         rtl_write16(RTL_CAPR, (u16)(g_rx_offset - 16));
         return 0;
@@ -214,7 +223,7 @@ u16 rtl8139_poll_packet(const u8 **data_out) {
     u16 packet_len = (u16)(rx_length - 4); /* Subtract CRC */
 
     /* Advance offset for next packet */
-    g_rx_offset = (u16)((g_rx_offset + rx_length + 4 + 3) & ~3u);
+    g_rx_offset = next_offset;
     if (g_rx_offset >= RTL_RX_BUF_SIZE - RTL_RX_BUF_PAD) {
         g_rx_offset = 0;
     }
