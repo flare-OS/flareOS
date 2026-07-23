@@ -27,6 +27,8 @@ in active development.
 - An in-work top (Linux task manager) remake
 - Ethernet support
 - cURL support
+- A working browser (HTTP)
+
 ## Build
 
 ```bash
