@@ -76,3 +76,18 @@ char *strncpy(char *dest, const char *src, usize count) {
     }
     return out;
 }
+
+char *strcat(char *dest, const char *src) {
+    char *out = dest;
+    while (*dest) ++dest;
+    while ((*dest++ = *src++));
+    return out;
+}
+
+char *strncat(char *dest, const char *src, usize count) {
+    char *out = dest;
+    while (*dest) ++dest;
+    while (count && *src) { *dest++ = *src++; --count; }
+    *dest = '\0';
+    return out;
+}

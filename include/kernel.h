@@ -38,11 +38,11 @@ enum {
     KEY_BACKSPACE = '\b',
     KEY_TAB = '\t',
     KEY_ESC = 0x100,
-    KEY_F1,
-    KEY_F2,
-    KEY_F3,
-    KEY_F4,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4,
     KEY_F10,
+    KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN,
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+    KEY_INSERT, KEY_DEL,
 };
 
 enum {
@@ -55,6 +55,8 @@ void panic(const char *message);
 
 void memory_init(void);
 void *kmalloc(usize size);
+usize heap_mark(void);
+void heap_reset(usize mark);
 usize heap_bytes_used(void);
 void *memcpy(void *dest, const void *src, usize count);
 void *memset(void *dest, int value, usize count);
@@ -64,6 +66,8 @@ int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, usize count);
 char *strcpy(char *dest, const char *src);
 char *strncpy(char *dest, const char *src, usize count);
+char *strcat(char *dest, const char *src);
+char *strncat(char *dest, const char *src, usize count);
 
 void gdt_init(void);
 void idt_init(void);
@@ -125,6 +129,7 @@ const char *fs_file_data(usize index, usize *size_out);
 
 void shell_init(void);
 void shell_render(void);
+void shell_cleanup_apps(void);
 void shell_keyboard_event(u16 key, int pressed);
 void shell_timer_tick(void);
 int shell_needs_redraw(void);
@@ -159,5 +164,32 @@ int net_is_ready(void);
 void net_poll(void);
 void net_get_ip(u32 *ip, u32 *gw, u32 *dns, u32 *mask);
 int net_http_get(const char *url, u8 *out_buf, u32 out_capacity, u32 *out_len);
+int net_http_post(const char *url, const char *content_type, const void *body, u32 body_len,
+                  u8 *out_buf, u32 out_capacity, u32 *out_len);
+int net_async_http_start(const char *url, u8 *out_buf, u32 out_capacity, u32 *out_len);
+void net_async_http_abort(void);
+int net_async_http_poll(void);
+
+void editor_start(const char *filename);
+int editor_active(void);
+void editor_keyboard_event(u16 key, int pressed);
+int editor_needs_redraw(void);
+void editor_render(void);
+
+void browser_start(const char *url);
+void browser_tick(void);
+int browser_active(void);
+void browser_keyboard_event(u16 key, int pressed);
+int browser_needs_redraw(void);
+void browser_render(void);
+
+void paging_init(void);
+u64 paging_mapped_bytes(void);
+u64 paging_table_count(void);
+u64 paging_alloc_pml4_copy(void);
+void paging_activate(u64 cr3_value);
+void paging_map_range(u64 virt, u64 phys, u64 size, u64 flags);
+void paging_map_page_4k(u64 virt, u64 phys, u64 flags);
+u64 current_cr3(void);
 
 #endif

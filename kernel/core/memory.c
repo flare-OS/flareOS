@@ -14,6 +14,14 @@ void *kmalloc(usize size) {
     return ptr;
 }
 
+usize heap_mark(void) {
+    return heap_offset;
+}
+
+void heap_reset(usize mark) {
+    heap_offset = mark;
+}
+
 usize heap_bytes_used(void) {
     return heap_offset;
 }

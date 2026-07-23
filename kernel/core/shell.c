@@ -40,6 +40,9 @@ static int g_snake_owner_session = -1;
 static u64 g_snake_ticks = 0;
 static u32 g_snake_input_count = 0;
 static u32 g_snake_render_count = 0;
+static int g_editor_owner_session = -1;
+static int g_browser_owner_session = -1;
+static usize g_app_heap_mark = 0;
 static int g_shell_dirty = 1;
 static int g_prompt_dirty = 0;
 
@@ -140,6 +143,20 @@ static int snake_visible_for_active_session(void) {
     return g_shell_view == SHELL_VIEW_SESSION && snake_active() && g_snake_owner_session == g_active_session;
 }
 
+static int editor_visible_for_active_session(void) {
+    return g_shell_view == SHELL_VIEW_SESSION && editor_active() && g_editor_owner_session == g_active_session;
+}
+
+static int browser_visible_for_active_session(void) {
+    return g_shell_view == SHELL_VIEW_SESSION && browser_active() && g_browser_owner_session == g_active_session;
+}
+
+static int current_session_has_app(void) {
+    return g_snake_owner_session == g_active_session ||
+           g_editor_owner_session == g_active_session ||
+           g_browser_owner_session == g_active_session;
+}
+
 static void session_push_line_raw(ShellSession *session, const char *text) {
     if (session->line_count == SHELL_MAX_LINES) {
         for (int i = 1; i < SHELL_MAX_LINES; ++i) {
@@ -187,18 +204,20 @@ static void session_prompt_line(const ShellSession *session, int session_index, 
 
 static const char *session_state_label(int session_index) {
     if (snake_active() && g_snake_owner_session == session_index) {
-        if (g_shell_view == SHELL_VIEW_SESSION && g_active_session == session_index) {
-            return "snk";
-        }
+        if (g_shell_view == SHELL_VIEW_SESSION && g_active_session == session_index) return "snk";
+        return "hold";
+    }
+    if (editor_active() && g_editor_owner_session == session_index) {
+        if (g_shell_view == SHELL_VIEW_SESSION && g_active_session == session_index) return "edt";
+        return "hold";
+    }
+    if (browser_active() && g_browser_owner_session == session_index) {
+        if (g_shell_view == SHELL_VIEW_SESSION && g_active_session == session_index) return "brw";
         return "hold";
     }
     if (g_active_session == session_index) {
-        if (g_shell_view == SHELL_VIEW_TASKMAN) {
-            return "top";
-        }
-        if (g_shell_view == SHELL_VIEW_SWITCHER) {
-            return "pick";
-        }
+        if (g_shell_view == SHELL_VIEW_TASKMAN) return "top";
+        if (g_shell_view == SHELL_VIEW_SWITCHER) return "pick";
         return "fg";
     }
     return "bg";
@@ -535,48 +554,116 @@ static void shell_curl(ShellSession *session, const char *url) {
         session_push_line(session, "net: network not ready");
         return;
     }
-    if (!url || url[0] == '\0') {
+
+    char output_name[64] = "";
+    char form_body[512] = "";
+    int has_form = 0;
+
+    const char *p = url;
+
+    while (p && *p) {
+        p = skip_spaces(p);
+        if (!p || !*p) break;
+        if (*p != '-') break;
+        ++p;
+        if (!*p || *p == ' ') break;
+        char flag = *p; ++p;
+        p = skip_spaces(p);
+        if (!p || !*p) break;
+
+        if (flag == 'o') {
+            const char *end = token_end(p);
+            usize flen = (usize)(end - p);
+            if (flen > 0 && flen < sizeof(output_name) - 1) {
+                memcpy(output_name, p, flen);
+                output_name[flen] = '\0';
+            }
+            p = end;
+        } else if (flag == 'F') {
+            const char *end = token_end(p);
+            usize flen = (usize)(end - p);
+            if (flen > 0) {
+                if (has_form) {
+                    if (strlen(form_body) + 1 + flen < sizeof(form_body) - 1) {
+                        strcat(form_body, "&");
+                        strncat(form_body, p, flen);
+                    }
+                } else {
+                    if (flen < sizeof(form_body) - 1) {
+                        memcpy(form_body, p, flen);
+                        form_body[flen] = '\0';
+                        has_form = 1;
+                    }
+                }
+            }
+            p = end;
+        } else {
+            break;
+        }
+    }
+
+    const char *target_url = skip_spaces(p);
+    if (!target_url || !*target_url) {
         session_push_line(session, "curl: missing URL");
         return;
     }
-    if (strncmp(url, "http://", 7) != 0) {
+    if (strncmp(target_url, "http://", 7) != 0) {
         session_push_line(session, "curl: only http:// URLs supported");
         return;
     }
+
     session_push_line(session, "curl: fetching...");
-    char name[32];
-    usize nlen = 0;
-    name[0] = '\0';
-    append_text(name, sizeof(name), &nlen, "resp");
-    {
-        u32 h = 0;
-        const char *p = url;
-        while (*p) { h = h * 31 + *p; ++p; }
+
+    char name[32]; usize nlen = 0; name[0] = '\0';
+    if (output_name[0]) {
+        strncpy(name, output_name, sizeof(name) - 1);
+    } else {
+        append_text(name, sizeof(name), &nlen, "resp");
+        u32 h = 0; const char *cp = target_url;
+        while (*cp) { h = h * 31 + *cp; ++cp; }
         append_u64_dec(name, sizeof(name), &nlen, h % 1000);
     }
-    name[nlen] = '\0';
+    name[sizeof(name) - 1] = '\0';
 
     u8 buf[8192];
     u32 out_len = 0;
-    if (net_http_get(url, buf, sizeof(buf), &out_len)) {
-        char size_line[64];
-        usize slen = 0; size_line[0] = '\0';
+    int ok;
+
+    if (has_form) {
+        ok = net_http_post(target_url, "application/x-www-form-urlencoded",
+                           form_body, (u32)strlen(form_body), buf, sizeof(buf), &out_len);
+    } else {
+        ok = net_http_get(target_url, buf, sizeof(buf), &out_len);
+    }
+
+    if (ok) {
+        char size_line[64]; usize slen = 0; size_line[0] = '\0';
         append_text(size_line, sizeof(size_line), &slen, "curl: got ");
         append_u64_dec(size_line, sizeof(size_line), &slen, out_len);
         append_text(size_line, sizeof(size_line), &slen, " bytes");
         session_push_line(session, size_line);
-        if (fs_is_writable()) {
-            if (fs_write_file(name, (const char *)buf, out_len, 0)) {
-                char saved[64];
-                usize saved_len = 0; saved[0] = '\0';
-                append_text(saved, sizeof(saved), &saved_len, "curl: saved to ");
-                append_text(saved, sizeof(saved), &saved_len, name);
-                session_push_line(session, saved);
+
+        if (output_name[0]) {
+            if (fs_is_writable()) {
+                if (fs_write_file(name, (const char *)buf, out_len, 0)) {
+                    char saved[64]; usize saved_len = 0; saved[0] = '\0';
+                    append_text(saved, sizeof(saved), &saved_len, "curl: saved to ");
+                    append_text(saved, sizeof(saved), &saved_len, name);
+                    session_push_line(session, saved);
+                } else {
+                    session_push_line(session, "curl: write failed");
+                }
             } else {
-                session_push_line(session, "curl: write failed");
+                session_push_line(session, "curl: read-only fs");
             }
         } else {
-            session_push_line(session, "curl: read-only fs");
+            char line[96]; usize ll = 0; line[0] = '\0';
+            for (u32 i = 0; i < out_len && ll < 80; ++i) {
+                char ch = (char)buf[i];
+                if (ch == '\n') { line[ll] = '\0'; session_push_line(session, line); ll = 0; }
+                else if (ch >= ' ') { line[ll++] = ch; }
+            }
+            if (ll > 0) { line[ll] = '\0'; session_push_line(session, line); }
         }
     } else {
         session_push_line(session, "curl: failed");
@@ -626,11 +713,16 @@ static void shell_launch_snake(ShellSession *session) {
         session_push_line(session, line);
         return;
     }
+    if (current_session_has_app() && !snake_active()) {
+        session_push_line(session, "another app is running in this session");
+        return;
+    }
 
     g_snake_owner_session = g_active_session;
     g_snake_ticks = 0;
     g_snake_input_count = 0;
     g_snake_render_count = 0;
+    g_app_heap_mark = heap_mark();
     snake_start(g_boot_info.total_memory, SNAKE_MIN_RAM_BYTES);
 }
 
@@ -680,6 +772,20 @@ static void shell_render_session_view(void) {
         snake_render();
         ++session->render_count;
         ++g_snake_render_count;
+        session->last_render_tick = g_ticks;
+        g_shell_dirty = 0;
+        return;
+    }
+    if (editor_visible_for_active_session()) {
+        editor_render();
+        ++session->render_count;
+        session->last_render_tick = g_ticks;
+        g_shell_dirty = 0;
+        return;
+    }
+    if (browser_visible_for_active_session()) {
+        browser_render();
+        ++session->render_count;
         session->last_render_tick = g_ticks;
         g_shell_dirty = 0;
         return;
@@ -781,53 +887,26 @@ static void shell_render_task_manager(void) {
     char line[96];
     char bar[32];
     usize len = 0;
-    int row = 5;
+    int row = 4;
+    int cols = console_width();
+    u64 total = g_boot_info.total_memory;
 
     console_clear(0x01);
     console_fill_row(0, 0x1f);
-    console_fill_row(1, 0x87);
-    console_write_at(1, 0, 0x1f, "flareOS / taskman");
+    console_write_at(1, 0, 0x1f, "flareOS / task manager");
 
-    line[0] = '\0';
+    line[0] = '\0'; len = 0;
     append_text(line, sizeof(line), &len, "tty");
     append_u64_dec(line, sizeof(line), &len, (u64)(g_active_session + 1));
     append_text(line, sizeof(line), &len, " ");
     append_text(line, sizeof(line), &len, g_sessions[g_active_session].user);
-    append_text(line, sizeof(line), &len, "  q back  F1-F4 tty");
+    append_text(line, sizeof(line), &len, "  q/esc back  F1-F4 switch  F10 refresh");
+    console_fill_row(1, 0x87);
     console_write_at(1, 1, 0x87, line);
 
-    build_bar(bar, sizeof(bar), g_boot_info.total_memory ? heap_bytes_used() : 0, g_boot_info.total_memory ? g_boot_info.total_memory : 1, 16);
-    len = 0;
-    line[0] = '\0';
-    append_text(line, sizeof(line), &len, "heap ");
-    append_text(line, sizeof(line), &len, bar);
-    append_char(line, sizeof(line), &len, ' ');
-    append_u64_dec(line, sizeof(line), &len, ram_mebibytes(heap_bytes_used()));
-    append_text(line, sizeof(line), &len, "M");
-    console_write_at(1, 2, 0x0f, line);
+    console_write_at(1, 2, 0x0f, " PID  USER   CMD  STATE     TICKS  INPUT  CMDS  RDR  ");
+    console_write_at(1, 3, 0x08, " ---- ------ ---- ------ -------- ------ ----- ---- ");
 
-    build_bar(bar, sizeof(bar), paging_mapped_bytes(), g_boot_info.total_memory ? g_boot_info.total_memory : 1, 16);
-    len = 0;
-    line[0] = '\0';
-    append_text(line, sizeof(line), &len, "map  ");
-    append_text(line, sizeof(line), &len, bar);
-    append_char(line, sizeof(line), &len, ' ');
-    append_u64_dec(line, sizeof(line), &len, ram_mebibytes(paging_mapped_bytes()));
-    append_text(line, sizeof(line), &len, "M");
-    console_write_at(1, 3, 0x0f, line);
-
-    build_bar(bar, sizeof(bar), g_sessions[g_active_session].focus_ticks, g_ticks ? g_ticks : 1, 16);
-    len = 0;
-    line[0] = '\0';
-    append_text(line, sizeof(line), &len, "cpu  ");
-    append_text(line, sizeof(line), &len, bar);
-    append_char(line, sizeof(line), &len, ' ');
-    append_u64_dec(line, sizeof(line), &len, ticks_to_seconds(g_sessions[g_active_session].focus_ticks));
-    append_text(line, sizeof(line), &len, "s");
-    console_write_at(1, 4, 0x0f, line);
-
-    console_fill_row(row, 0x08);
-    console_write_at(1, row++, 0x0f, "pid usr kd  st      tk  in cm dr");
     shell_render_task_row(row++, 0, "sys", "krn", "run", g_ticks, 0, 0, 0, 0x0f);
 
     for (int i = 0; i < SHELL_SESSION_COUNT; ++i) {
@@ -843,7 +922,7 @@ static void shell_render_task_manager(void) {
                               i == g_active_session ? 0x0e : 0x0f);
     }
 
-    if (snake_active() && g_snake_owner_session >= 0 && g_snake_owner_session < SHELL_SESSION_COUNT && row < console_height() - 1) {
+    if (snake_active() && g_snake_owner_session >= 0 && g_snake_owner_session < SHELL_SESSION_COUNT && row < console_height() - 4) {
         shell_render_task_row(row,
                               (u32)(40 + g_snake_owner_session + 1),
                               g_sessions[g_snake_owner_session].user,
@@ -854,7 +933,68 @@ static void shell_render_task_manager(void) {
                               0,
                               g_snake_render_count,
                               0x0a);
+        ++row;
     }
+
+    if (editor_active() && g_editor_owner_session >= 0 && g_editor_owner_session < SHELL_SESSION_COUNT && row < console_height() - 4) {
+        shell_render_task_row(row,
+                              (u32)(50 + g_editor_owner_session + 1),
+                              g_sessions[g_editor_owner_session].user,
+                              "edt",
+                              g_active_session == g_editor_owner_session && g_shell_view == SHELL_VIEW_SESSION ? "run" : "hold",
+                              0, 0, 0, 0,
+                              0x0b);
+        ++row;
+    }
+
+    if (browser_active() && g_browser_owner_session >= 0 && g_browser_owner_session < SHELL_SESSION_COUNT && row < console_height() - 4) {
+        shell_render_task_row(row,
+                              (u32)(60 + g_browser_owner_session + 1),
+                              g_sessions[g_browser_owner_session].user,
+                              "brw",
+                              g_active_session == g_browser_owner_session && g_shell_view == SHELL_VIEW_SESSION ? "run" : "hold",
+                              0, 0, 0, 0,
+                              0x0d);
+        ++row;
+    }
+
+    while (row < console_height() - 4) {
+        console_fill_row(row, 0x01);
+        ++row;
+    }
+
+    console_fill_row(console_height() - 4, 0x08);
+    len = 0; line[0] = '\0';
+    build_bar(bar, sizeof(bar), total ? heap_bytes_used() : 0, total ? total : 1, cols - 6);
+    append_text(line, sizeof(line), &len, "mem ");
+    append_text(line, sizeof(line), &len, bar);
+    console_write_at(1, console_height() - 4, 0x0f, line);
+
+    console_fill_row(console_height() - 3, 0x08);
+    len = 0; line[0] = '\0';
+    build_bar(bar, sizeof(bar), total ? paging_mapped_bytes() : 0, total ? total : 1, cols - 6);
+    append_text(line, sizeof(line), &len, "map ");
+    append_text(line, sizeof(line), &len, bar);
+    console_write_at(1, console_height() - 3, 0x0f, line);
+
+    console_fill_row(console_height() - 2, 0x08);
+    len = 0; line[0] = '\0';
+    build_bar(bar, sizeof(bar), g_sessions[g_active_session].focus_ticks, g_ticks ? g_ticks : 1, cols - 6);
+    append_text(line, sizeof(line), &len, "cpu ");
+    append_text(line, sizeof(line), &len, bar);
+    console_write_at(1, console_height() - 2, 0x0f, line);
+
+    console_fill_row(console_height() - 1, 0x08);
+    len = 0; line[0] = '\0';
+    append_text(line, sizeof(line), &len, "up ");
+    append_u64_dec(line, sizeof(line), &len, ticks_to_seconds(g_ticks));
+    append_text(line, sizeof(line), &len, "s  heap ");
+    append_u64_dec(line, sizeof(line), &len, ram_mebibytes(heap_bytes_used()));
+    append_text(line, sizeof(line), &len, "M / ");
+    append_u64_dec(line, sizeof(line), &len, ram_mebibytes(total));
+    append_text(line, sizeof(line), &len, "M  pg ");
+    append_u64_dec(line, sizeof(line), &len, paging_table_count());
+    console_write_at(1, console_height() - 1, 0x0f, line);
 
     g_shell_dirty = 0;
 }
@@ -933,6 +1073,7 @@ static void shell_run_command(ShellSession *session) {
         session_push_line(session, "users uptime mem paging snake sessions");
         session_push_line(session, "switch <tty|user> top layout install");
         session_push_line(session, "write append rm panic halt net curl <url>");
+        session_push_line(session, "edit <file>  browse <url>");
     } else if (strcmp(line, "clear") == 0) {
         session->line_count = 0;
     } else if (strncmp(line, "echo ", 5) == 0) {
@@ -986,6 +1127,16 @@ static void shell_run_command(ShellSession *session) {
         shell_net_status(session);
     } else if (strncmp(line, "curl ", 5) == 0) {
         shell_curl(session, line + 5);
+    } else if (strncmp(line, "edit ", 5) == 0) {
+        const char *ename = skip_spaces(line + 5);
+        if (!*ename) { session_push_line(session, "usage: edit <filename>"); }
+        else if (current_session_has_app()) { session_push_line(session, "another app is running in this session"); }
+        else { g_editor_owner_session = g_active_session; g_app_heap_mark = heap_mark(); editor_start(ename); }
+    } else if (strncmp(line, "browse ", 7) == 0) {
+        const char *burl = skip_spaces(line + 7);
+        if (!*burl) { session_push_line(session, "usage: browse <url>"); }
+        else if (current_session_has_app()) { session_push_line(session, "another app is running in this session"); }
+        else { g_browser_owner_session = g_active_session; g_app_heap_mark = heap_mark(); browser_start(burl); }
     } else if (strcmp(line, "panic") == 0 || strcmp(line, "crash") == 0) {
         shell_trigger_panic();
     } else if (strcmp(line, "halt") == 0) {
@@ -1075,6 +1226,10 @@ void shell_init(void) {
     g_snake_ticks = 0;
     g_snake_input_count = 0;
     g_snake_render_count = 0;
+    g_editor_owner_session = -1;
+    g_browser_owner_session = -1;
+
+    g_browser_owner_session = -1;
 
     for (int i = 0; i < SHELL_SESSION_COUNT; ++i) {
         ShellSession *session = &g_sessions[i];
@@ -1101,6 +1256,27 @@ void shell_init(void) {
 
     ++g_sessions[0].switch_count;
     g_shell_dirty = 1;
+}
+
+void shell_cleanup_apps(void) {
+    g_snake_owner_session = -1;
+    g_editor_owner_session = -1;
+    g_browser_owner_session = -1;
+}
+
+static void shell_cleanup_exited_apps(void) {
+    if (g_snake_owner_session >= 0 && !snake_active()) {
+        g_snake_owner_session = -1;
+        heap_reset(g_app_heap_mark);
+    }
+    if (g_editor_owner_session >= 0 && !editor_active()) {
+        g_editor_owner_session = -1;
+        heap_reset(g_app_heap_mark);
+    }
+    if (g_browser_owner_session >= 0 && !browser_active()) {
+        g_browser_owner_session = -1;
+        heap_reset(g_app_heap_mark);
+    }
 }
 
 static void shell_update_prompt(void) {
@@ -1177,6 +1353,18 @@ void shell_keyboard_event(u16 key, int pressed) {
         return;
     }
 
+    if (editor_visible_for_active_session()) {
+        editor_keyboard_event(key, pressed);
+        g_shell_dirty = 1;
+        return;
+    }
+
+    if (browser_visible_for_active_session()) {
+        browser_keyboard_event(key, pressed);
+        g_shell_dirty = 1;
+        return;
+    }
+
     if (key == KEY_ESC) {
         shell_open_switcher();
         return;
@@ -1199,6 +1387,8 @@ void shell_keyboard_event(u16 key, int pressed) {
 void shell_timer_tick(void) {
     ++g_sessions[g_active_session].focus_ticks;
 
+    shell_cleanup_exited_apps();
+
     if (snake_visible_for_active_session()) {
         ++g_snake_ticks;
         snake_timer_tick();
@@ -1213,6 +1403,12 @@ void shell_timer_tick(void) {
 int shell_needs_redraw(void) {
     if (snake_visible_for_active_session()) {
         return g_shell_dirty || g_prompt_dirty || snake_needs_redraw();
+    }
+    if (editor_visible_for_active_session()) {
+        return g_shell_dirty || g_prompt_dirty || editor_needs_redraw();
+    }
+    if (browser_visible_for_active_session()) {
+        return g_shell_dirty || g_prompt_dirty || browser_needs_redraw();
     }
     return g_shell_dirty || g_prompt_dirty;
 }

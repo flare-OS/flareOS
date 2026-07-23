@@ -431,7 +431,7 @@ static void tcp_handle(const u8 *data, u16 len) {
     }
 }
 
-static int tcp_connect(u32 dst_ip, u16 dst_port) {
+static void tcp_init_connect(u32 dst_ip, u16 dst_port) {
     g_tcp.state = TCP_STATE_SYN_SENT;
     g_tcp.dst_ip = dst_ip;
     g_tcp.dst_port = dst_port;
@@ -442,14 +442,23 @@ static int tcp_connect(u32 dst_ip, u16 dst_port) {
     g_tcp.rx_len = 0;
     g_tcp.rx_capacity = sizeof(g_tcp_rx_buf);
     g_tcp.rx_done = 0;
+}
 
+static int tcp_connect_poll(void) {
+    net_poll();
+    if (g_tcp.state == TCP_STATE_ESTABLISHED) return 1;
+    if (g_tcp.state == TCP_STATE_DONE) return -1;
+    return 0;
+}
+
+static int tcp_connect(u32 dst_ip, u16 dst_port) {
+    tcp_init_connect(dst_ip, dst_port);
     tcp_send_flags(&g_tcp, TCP_SYN, NULL, 0);
-
     u64 deadline = g_ticks + 300;
     while (g_ticks < deadline) {
-        net_poll();
-        if (g_tcp.state == TCP_STATE_ESTABLISHED) return 1;
-        if (g_tcp.state == TCP_STATE_DONE) return 0;
+        int r = tcp_connect_poll();
+        if (r == 1) return 1;
+        if (r == -1) return 0;
     }
     return 0;
 }
@@ -567,6 +576,219 @@ int net_http_get(const char *url, u8 *out_buf, u32 out_capacity, u32 *out_len) {
 
     tcp_close();
     return 1;
+}
+
+int net_http_post(const char *url, const char *content_type, const void *body, u32 body_len,
+                  u8 *out_buf, u32 out_capacity, u32 *out_len) {
+    if (!g_net_ready) { serial_write("net: no network\n"); return 0; }
+    if (!parse_url(url)) { serial_write("net: bad URL\n"); return 0; }
+
+    u32 ip = dns_resolve(g_http_hostname);
+    if (ip == 0) { serial_write("net: DNS failed\n"); return 0; }
+    if (!tcp_connect(ip, 80)) { serial_write("net: TCP connect failed\n"); return 0; }
+
+    static char request[1024];
+    usize rlen = 0;
+    const char *post = "POST ";
+    const char *http = " HTTP/1.0\r\nHost: ";
+    const char *ct_hdr = "\r\nContent-Type: ";
+    const char *cl_hdr = "\r\nContent-Length: ";
+    const char *end = "\r\nConnection: close\r\n\r\n";
+
+    const char *parts[] = {post, g_http_path, http, g_http_hostname, ct_hdr, content_type, cl_hdr};
+    for (int i = 0; i < 7; ++i) {
+        usize plen = strlen(parts[i]);
+        if (rlen + plen >= sizeof(request)) { tcp_close(); return 0; }
+        memcpy(request + rlen, parts[i], plen);
+        rlen += plen;
+    }
+    {
+        char len_str[16];
+        usize ll = 0;
+        u32 tmp = body_len;
+        char d[16]; int c = 0;
+        do { d[c++] = (char)('0' + (tmp % 10u)); tmp /= 10u; } while (tmp && c < 16);
+        while (c > 0) len_str[ll++] = d[--c];
+        len_str[ll] = '\0';
+        if (rlen + ll + 4 >= sizeof(request)) { tcp_close(); return 0; }
+        memcpy(request + rlen, len_str, ll); rlen += ll;
+        memcpy(request + rlen, end, 4); rlen += 4;
+    }
+
+    if (!tcp_send(request, (u16)rlen)) { tcp_close(); return 0; }
+    if (body_len > 0 && !tcp_send(body, (u16)body_len)) { tcp_close(); return 0; }
+    if (!tcp_recv_all()) { tcp_close(); return 0; }
+
+    u32 body_start = 0;
+    for (u32 i = 0; i + 3 < g_tcp.rx_len; ++i) {
+        if (g_tcp_rx_buf[i] == '\r' && g_tcp_rx_buf[i + 1] == '\n' &&
+            g_tcp_rx_buf[i + 2] == '\r' && g_tcp_rx_buf[i + 3] == '\n') {
+            body_start = i + 4; break;
+        }
+    }
+    u32 bl = g_tcp.rx_len - body_start;
+    if (bl > out_capacity) bl = out_capacity;
+    memcpy(out_buf, g_tcp_rx_buf + body_start, bl);
+    *out_len = bl;
+    tcp_close();
+    return 1;
+}
+
+/* ========== Async HTTP (non-blocking state machine) ========== */
+
+typedef enum {
+    HTTP_ASYNC_IDLE,
+    HTTP_ASYNC_DNS,
+    HTTP_ASYNC_TCP_CONNECT,
+    HTTP_ASYNC_TCP_RECV,
+    HTTP_ASYNC_DONE,
+    HTTP_ASYNC_FAILED
+} HttpAsyncState;
+
+static HttpAsyncState g_async_state = HTTP_ASYNC_IDLE;
+static u8 *g_async_out_buf;
+static u32 g_async_out_capacity;
+static u32 *g_async_out_len;
+static u64 g_async_deadline;
+static int g_async_attempt;
+static u32 g_async_ip;
+
+#define ASYNC_DNS_TIMEOUT 150
+#define ASYNC_TCP_TIMEOUT 300
+#define ASYNC_RECV_TIMEOUT 600
+#define ASYNC_MAX_ATTEMPTS 3
+
+static void async_send_dns(void) {
+    g_dns_result = 0;
+    g_dns_done = 0;
+    static u8 dns_buf[512];
+    u16 *hdr = (u16 *)dns_buf;
+    hdr[0] = htons(0x1234); hdr[1] = htons(0x0100);
+    hdr[2] = htons(1); hdr[3] = 0; hdr[4] = 0; hdr[5] = 0;
+    u8 *qname = dns_buf + 12;
+    usize pos = 0;
+    const char *p = g_http_hostname;
+    while (*p) {
+        const char *dot = p;
+        while (*dot && *dot != '.') ++dot;
+        u8 len = (u8)(dot - p);
+        qname[pos++] = len;
+        memcpy(qname + pos, p, len);
+        pos += len;
+        p = *dot ? dot + 1 : dot;
+    }
+    qname[pos++] = 0;
+    qname[pos++] = 0; qname[pos++] = 1;
+    qname[pos++] = 0; qname[pos++] = 1;
+    net_send_udp(g_dns_ip, 12345, 53, dns_buf, (u16)(12 + pos));
+}
+
+static void async_send_request(void) {
+    static char request[512];
+    usize rlen = 0;
+    const char *parts[] = {"GET ", g_http_path, " HTTP/1.0\r\nHost: ", g_http_hostname, "\r\nConnection: close\r\n\r\n"};
+    for (int i = 0; i < 5; ++i) {
+        usize plen = strlen(parts[i]);
+        if (rlen + plen >= sizeof(request)) return;
+        memcpy(request + rlen, parts[i], plen);
+        rlen += plen;
+    }
+    if (tcp_send_flags(&g_tcp, TCP_PSH | TCP_ACK, request, (u16)rlen))
+        g_tcp.seq += rlen;
+}
+
+int net_async_http_start(const char *url, u8 *out_buf, u32 out_capacity, u32 *out_len) {
+    if (g_async_state != HTTP_ASYNC_IDLE) net_async_http_abort();
+    if (!g_net_ready) return 0;
+    if (!parse_url(url)) return 0;
+    g_async_out_buf = out_buf;
+    g_async_out_capacity = out_capacity;
+    g_async_out_len = out_len;
+    g_async_attempt = 0;
+    g_async_ip = 0;
+    async_send_dns();
+    g_async_state = HTTP_ASYNC_DNS;
+    g_async_deadline = g_ticks + ASYNC_DNS_TIMEOUT;
+    return 1;
+}
+
+void net_async_http_abort(void) {
+    if (g_async_state != HTTP_ASYNC_IDLE) {
+        if (g_async_state == HTTP_ASYNC_TCP_CONNECT || g_async_state == HTTP_ASYNC_TCP_RECV)
+            tcp_close();
+        g_async_state = HTTP_ASYNC_IDLE;
+    }
+}
+
+int net_async_http_poll(void) {
+    if (g_async_state == HTTP_ASYNC_IDLE) return -1;
+    if (g_async_state == HTTP_ASYNC_DONE) { g_async_state = HTTP_ASYNC_IDLE; return 1; }
+    if (g_async_state == HTTP_ASYNC_FAILED) { g_async_state = HTTP_ASYNC_IDLE; return -1; }
+
+    net_poll();
+
+    switch (g_async_state) {
+    case HTTP_ASYNC_DNS:
+        if (g_dns_done) {
+            if (g_dns_result) {
+                g_async_ip = g_dns_result;
+                tcp_init_connect(g_async_ip, 80);
+                tcp_send_flags(&g_tcp, TCP_SYN, NULL, 0);
+                g_async_state = HTTP_ASYNC_TCP_CONNECT;
+                g_async_deadline = g_ticks + ASYNC_TCP_TIMEOUT;
+            } else {
+                g_async_state = HTTP_ASYNC_FAILED;
+            }
+        } else if (g_ticks >= g_async_deadline) {
+            ++g_async_attempt;
+            if (g_async_attempt < ASYNC_MAX_ATTEMPTS) {
+                async_send_dns();
+                g_async_deadline = g_ticks + ASYNC_DNS_TIMEOUT;
+            } else {
+                g_async_state = HTTP_ASYNC_FAILED;
+            }
+        }
+        break;
+
+    case HTTP_ASYNC_TCP_CONNECT:
+        if (g_tcp.state == TCP_STATE_ESTABLISHED) {
+            async_send_request();
+            g_async_state = HTTP_ASYNC_TCP_RECV;
+            g_async_deadline = g_ticks + ASYNC_RECV_TIMEOUT;
+        } else if (g_tcp.state == TCP_STATE_DONE || g_ticks >= g_async_deadline) {
+            g_async_state = HTTP_ASYNC_FAILED;
+        }
+        break;
+
+    case HTTP_ASYNC_TCP_RECV:
+        if (g_tcp.rx_done) {
+            u32 body_start = 0;
+            for (u32 i = 0; i + 3 < g_tcp.rx_len; ++i) {
+                if (g_tcp_rx_buf[i] == '\r' && g_tcp_rx_buf[i+1] == '\n' &&
+                    g_tcp_rx_buf[i+2] == '\r' && g_tcp_rx_buf[i+3] == '\n') {
+                    body_start = i + 4;
+                    break;
+                }
+            }
+            u32 body_len = g_tcp.rx_len - body_start;
+            if (body_len > g_async_out_capacity) body_len = g_async_out_capacity;
+            memcpy(g_async_out_buf, g_tcp_rx_buf + body_start, body_len);
+            *g_async_out_len = body_len;
+            tcp_close();
+            g_async_state = HTTP_ASYNC_DONE;
+        } else if (g_ticks >= g_async_deadline) {
+            tcp_close();
+            g_async_state = HTTP_ASYNC_FAILED;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    if (g_async_state == HTTP_ASYNC_DONE) return 1;
+    if (g_async_state == HTTP_ASYNC_FAILED) return -1;
+    return 0;
 }
 
 /* ========== Public API ========== */
