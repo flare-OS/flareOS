@@ -50,6 +50,15 @@ static const u16 *g_keymap = qwerty_keymap;
 static int g_layout = KEYBOARD_LAYOUT_QWERTY;
 static int g_shift = 0;
 static int g_caps = 0;
+static int g_extended = 0;
+static int g_ctrl = 0;
+
+static const u16 g_ext_keymap[128] = {
+    [0x47] = KEY_HOME, [0x48] = KEY_UP, [0x49] = KEY_PGUP,
+    [0x4B] = KEY_LEFT, [0x4D] = KEY_RIGHT,
+    [0x4F] = KEY_END,  [0x50] = KEY_DOWN, [0x51] = KEY_PGDN,
+    [0x52] = KEY_INSERT, [0x53] = KEY_DEL,
+};
 
 static u16 shift_value(u16 key) {
     switch (key) {
@@ -68,32 +77,36 @@ static u16 shift_value(u16 key) {
 void keyboard_handle_irq(void) {
     u8 scancode = inb(0x60);
 
+    if (scancode == 0xE0) { g_extended = 1; return; }
+    if (scancode == 0x1D) { g_ctrl = 1; return; }
+    if (scancode == 0x9D) { g_ctrl = 0; return; }
     if (scancode == 0x2A || scancode == 0x36) { g_shift = 1; return; }
     if (scancode == 0xAA || scancode == 0xB6) { g_shift = 0; return; }
+    if (scancode == 0x3A) { g_caps = !g_caps; return; }
+    if (scancode & 0x80u) { g_extended = 0; return; }
 
-    if (scancode == 0x3A) {
-        g_caps = !g_caps;
-        return;
-    }
-
-    if (scancode & 0x80u) return;
-    if (scancode >= 128) return;
-
-    u16 key = g_keymap[scancode];
-    if (key == KEY_NONE) return;
-
-    if (key >= 'a' && key <= 'z') {
-        if (g_shift ^ g_caps) {
-            key = (u16)(key - 'a' + 'A');
+    u16 key;
+    if (g_extended) {
+        g_extended = 0;
+        if (scancode >= 128) return;
+        key = g_ext_keymap[scancode];
+        if (key == KEY_NONE) return;
+    } else {
+        if (scancode >= 128) return;
+        key = g_keymap[scancode];
+        if (key == KEY_NONE) return;
+        if (g_ctrl && key >= 'a' && key <= 'z') {
+            key = 0x200u | key;
+        } else if (key >= 'a' && key <= 'z') {
+            if (g_shift ^ g_caps) key = (u16)(key - 'a' + 'A');
+        } else if (g_shift) {
+            u16 s = shift_value(key);
+            if (s) key = s;
         }
-    } else if (g_shift) {
-        u16 s = shift_value(key);
-        if (s) key = s;
     }
 
     u8 next_head = (u8)((key_queue_head + 1u) % KEY_QUEUE_SIZE);
     if (next_head == key_queue_tail) return;
-
     key_queue[key_queue_head] = key;
     key_queue_head = next_head;
 }

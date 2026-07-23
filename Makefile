@@ -41,7 +41,9 @@ KERNEL_OBJS := \
 	$(BUILD)/ext4.o \
 	$(BUILD)/pci.o \
 	$(BUILD)/rtl8139.o \
-	$(BUILD)/net.o
+	$(BUILD)/net.o \
+	$(BUILD)/editor.o \
+	$(BUILD)/browser.o
 
 all: $(BUILD)/os.img
 
